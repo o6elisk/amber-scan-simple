@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Amber Monitor</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://moment.github.io/luxon/global/luxon.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>Amber Price Monitor</h1>
+        
+        <form id="settingsForm">
+            <div class="form-group">
+                <label for="apiToken">Amber API Token:</label>
+                <input type="text" id="apiToken" name="apiToken" required>
+            </div>
+
+            <div class="form-group">
+                <label for="siteId">Site ID:</label>
+                <input type="text" 
+                       id="siteId" 
+                       name="siteId" 
+                       readonly 
+                       disabled 
+                       placeholder="Will be auto-generated on save">
+            </div>
+
+            <div class="form-group">
+                <label for="email">Email for Notifications:</label>
+                <input type="email" id="email" name="email" required>
+            </div>
+
+            <div class="form-group">
+                <div class="checkbox-group">
+                    <label>
+                        <input type="checkbox" id="highPriceEnabled" name="highPriceEnabled" checked>
+                        High Price Alert
+                    </label>
+                    <input type="number" id="highPrice" name="highPrice" value="30" step="0.1">
+                    <span class="unit">¢/kWh</span>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <div class="checkbox-group">
+                    <label>
+                        <input type="checkbox" id="lowPriceEnabled" name="lowPriceEnabled" checked>
+                        Low Price Alert
+                    </label>
+                    <input type="number" id="lowPrice" name="lowPrice" value="10" step="0.1">
+                    <span class="unit">¢/kWh</span>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <div class="checkbox-group">
+                    <label>
+                        <input type="checkbox" id="renewablesEnabled" name="renewablesEnabled" checked>
+                        Renewables Alert
+                    </label>
+                    <input type="number" id="renewables" name="renewables" value="90" step="1">
+                    <span class="unit">%</span>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <div class="checkbox-group">
+                    <label>
+                        <input type="checkbox" id="quietHoursEnabled" name="quietHoursEnabled" checked>
+                        Quiet Hours
+                    </label>
+                    <input type="time" id="quietHoursStart" name="quietHoursStart">
+                    <span>to</span>
+                    <input type="time" id="quietHoursEnd" name="quietHoursEnd">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="timezone">Your Timezone:</label>
+                <select id="timezone" name="timezone" required>
+                    <!-- Will be populated via JavaScript -->
+                </select>
+            </div>
+
+            <div class="form-group">
+                <div class="checkbox-group">
+                    <label>
+                        <input type="checkbox" id="emailNotifications" name="emailNotifications" checked>
+                        Enable Email Notifications
+                    </label>
+                </div>
+            </div>
+
+            <button type="submit">Save Settings</button>
+        </form>
+
+        <div class="status-box">
+            <h2>Current Status</h2>
+            <div class="status-item">
+                <span>Current Price:</span>
+                <span id="currentPrice">--</span>
+                <span class="unit">¢/kWh</span>
+            </div>
+            <div class="status-item">
+                <span>Renewables:</span>
+                <span id="currentRenewables">--</span>
+                <span class="unit">%</span>
+            </div>
+            <div class="status-item">
+                <span>Last Updated:</span>
+                <span id="lastUpdate">Never</span>
+            </div>
+            <button id="refreshButton">Refresh</button>
+        </div>
+    </div>
+
+    <script>
+        // Add this at the top of your script
+        const SERVER_URL = 'http://localhost:3000';
+
+        // Add at the top of your script
+        function debounce(func, wait) {
+            let timeout;
+            return function executedFunction(...args) {
+                const later = () => {
+                    clearTimeout(timeout);
+                    func(...args);
+                };
+                clearTimeout(timeout);
+                timeout = setTimeout(later, wait);
+            };
+        }
+
+        // On page load - keep it simple
+        window.addEventListener('DOMContentLoaded', async () => {
+            const savedEmail = localStorage.getItem('userEmail');
+            populateTimezones();
+            if (!savedEmail) return;
+
+            try {
+                const response = await fetch(`${SERVER_URL}/api/settings-by-email/${savedEmail}`);
+                
+                if (response.ok) {
+                    const settings = await response.json();
+                    if (settings.email) {
+                        const loadingToast = showLoading('Loading your settings...');
+                        
+                        // Update site ID field
+                        const siteIdField = document.getElementById('siteId');
+                        if (settings.site_id) {
+                            siteIdField.value = settings.site_id;
+                            siteIdField.disabled = true;
+                            siteIdField.placeholder = 'Site ID';
+                        } else {
+                            siteIdField.value = '';
+                            siteIdField.disabled = true;
+                            siteIdField.placeholder = 'Will be auto-generated on save';
+                        }
+
+                        // Populate all form fields
+                        document.getElementById('apiToken').value = settings.api_token || '';
+                        document.getElementById('email').value = settings.email;
+                        document.getElementById('highPrice').value = settings.high_price || '';
+                        document.getElementById('lowPrice').value = settings.low_price || '';
+                        document.getElementById('renewables').value = settings.renewables || '';
+                        
+                        // Set checkboxes
+                        document.getElementById('highPriceEnabled').checked = settings.high_price_enabled;
+                        document.getElementById('lowPriceEnabled').checked = settings.low_price_enabled;
+                        document.getElementById('renewablesEnabled').checked = settings.renewables_enabled;
+                        
+                        // Update disabled states
+                        document.getElementById('highPrice').disabled = !settings.high_price_enabled;
+                        document.getElementById('lowPrice').disabled = !settings.low_price_enabled;
+                        document.getElementById('renewables').disabled = !settings.renewables_enabled;
+
+                        // Handle quiet hours
+                        if (settings.quiet_hours) {
+                            const quietHours = JSON.parse(settings.quiet_hours);
+                            if (quietHours.length > 0) {
+                                document.getElementById('quietHoursStart').value = quietHours[0].start;
+                                document.getElementById('quietHoursEnd').value = quietHours[0].end;
+                            }
+                            document.getElementById('quietHoursEnabled').checked = settings.quiet_hours_enabled;
+                            document.getElementById('quietHoursStart').disabled = !settings.quiet_hours_enabled;
+                            document.getElementById('quietHoursEnd').disabled = !settings.quiet_hours_enabled;
+                        }
+
+                        // Get current price if we have API token
+                        if (settings.api_token) {
+                            await refreshPriceData(settings.api_token);
+                        }
+                        loadingToast?.remove();
+                    }
+                }
+            } catch (error) {
+                console.error('❌ Error:', error);
+                showError('Failed to load settings');
+            } finally {
+                hideLoading();
+            }
+        });
+
+        // Update the form submission handler
+        document.getElementById('settingsForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const loadingToast = showLoading('Setting up your monitor...');
+            const siteIdField = document.getElementById('siteId');
+
+            try {
+                const formData = new FormData(e.target);
+                const settings = Object.fromEntries(formData);
+                
+                localStorage.setItem('userEmail', settings.email);
+                
+                if (!settings.siteId) {
+                    loadingToast.textContent = 'Connecting to Amber...';
+                    siteIdField.placeholder = 'Generating...';
+                    
+                    const siteResponse = await fetch(`${SERVER_URL}/api/generate-site-id?apiToken=${settings.apiToken}`);
+                    if (siteResponse.ok) {
+                        const { siteId } = await siteResponse.json();
+                        settings.siteId = siteId;
+                        siteIdField.value = siteId;
+                        siteIdField.placeholder = 'Site ID';
+                    }
+                }
+                
+                loadingToast.textContent = 'Saving settings...';
+                const response = await fetch(`${SERVER_URL}/api/settings`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        apiToken: settings.apiToken,
+                        email: settings.email,
+                        highPrice: parseFloat(settings.highPrice),
+                        lowPrice: parseFloat(settings.lowPrice),
+                        renewables: parseInt(settings.renewables),
+                        highPriceEnabled: settings.highPriceEnabled === 'on',
+                        lowPriceEnabled: settings.lowPriceEnabled === 'on',
+                        renewablesEnabled: settings.renewablesEnabled === 'on',
+                        quietHoursEnabled: settings.quietHoursEnabled === 'on',
+                        emailNotifications: settings.emailNotifications === 'on',
+                        quietHours: settings.quietHours,
+                        timezone: settings.timezone,
+                    })
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Failed to save settings');
+                }
+
+                await response.json();
+                showSuccess('Monitor setup complete!');
+                
+                // Add small delay before fetching prices
+                await new Promise(resolve => setTimeout(resolve, 500));
+                await refreshPriceData(settings.apiToken);
+            } catch (error) {
+                console.error('Error:', error);
+                showError(error.message);
+                siteIdField.placeholder = 'Failed to generate';
+            } finally {
+                loadingToast?.remove();
+                siteIdField.disabled = true;
+            }
+        });
+
+        // Handle refresh button
+        document.getElementById('refreshButton').addEventListener('click', async () => {
+            const apiToken = document.getElementById('apiToken').value;
+            if (!apiToken) {
+                showError('Please enter an API token');
+                return;
+            }
+            await refreshPriceData(apiToken);
+        });
+
+        // Handle checkbox changes
+        ['highPrice', 'lowPrice', 'renewables'].forEach(id => {
+            document.getElementById(id + 'Enabled').addEventListener('change', (e) => {
+                document.getElementById(id).disabled = !e.target.checked;
+            });
+        });
+
+        // Handle quiet hours toggle
+        document.getElementById('quietHoursEnabled').addEventListener('change', (e) => {
+            document.getElementById('quietHoursStart').disabled = !e.target.checked;
+            document.getElementById('quietHoursEnd').disabled = !e.target.checked;
+        });
+
+        // Helper functions
+        async function refreshPriceData(apiToken) {
+            const loadingToast = showLoading('Fetching Amber data...');
+            try {
+                const response = await fetch(`${SERVER_URL}/api/current-price?apiToken=${apiToken}`);
+                if (!response.ok) throw new Error('Failed to fetch current price');
+                
+                const data = await response.json();
+                document.getElementById('currentPrice').textContent = Number(data.price).toFixed(2);
+                document.getElementById('currentRenewables').textContent = Math.round(data.renewables);
+                document.getElementById('lastUpdate').textContent = new Date().toLocaleString();
+                
+                showSuccess('Amber data updated successfully');
+            } catch (error) {
+                console.error('Error fetching price:', error);
+                showError(`Failed to fetch Amber data: ${error.message}`);
+            } finally {
+                loadingToast?.remove();
+            }
+        }
+
+        function populateForm(settings) {
+            Object.keys(settings).forEach(key => {
+                const element = document.getElementById(key);
+                if (element) {
+                    if (element.type === 'checkbox') {
+                        element.checked = settings[key];
+                        // Also update the related input's disabled state
+                        const relatedInput = document.getElementById(key.replace('Enabled', ''));
+                        if (relatedInput) {
+                            relatedInput.disabled = !settings[key];
+                        }
+                    } else {
+                        element.value = settings[key];
+                    }
+                }
+            });
+            
+            // Handle quiet hours
+            if (settings.quiet_hours) {
+                const quietHours = JSON.parse(settings.quiet_hours);
+                if (quietHours.length > 0) {
+                    document.getElementById('quietHoursStart').value = quietHours[0].start;
+                    document.getElementById('quietHoursEnd').value = quietHours[0].end;
+                }
+                const quietHoursEnabled = document.getElementById('quietHoursEnabled');
+                quietHoursEnabled.checked = settings.quiet_hours_enabled;
+                document.getElementById('quietHoursStart').disabled = !settings.quiet_hours_enabled;
+                document.getElementById('quietHoursEnd').disabled = !settings.quiet_hours_enabled;
+            }
+            
+            // Handle timezone
+            if (settings.timezone) {
+                const timezoneSelect = document.getElementById('timezone');
+                const option = Array.from(timezoneSelect.options).find(opt => opt.value === settings.timezone);
+                if (option) {
+                    option.selected = true;
+                }
+            }
+        }
+
+        // Update the toast notification functions
+        function showToast(message, type = 'info', duration = 3000) {
+            // Remove any existing toasts first
+            const existingToast = document.querySelector('.toast');
+            if (existingToast) existingToast.remove();
+            
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            
+            if (type !== 'loading') {
+                setTimeout(() => toast.remove(), duration);
+            }
+            
+            return toast;
+        }
+
+        function showLoading(message = 'Loading data...') {
+            return showToast(message, 'loading');
+        }
+
+        function showSuccess(message) {
+            return showToast(message, 'success');
+        }
+
+        function showError(message) {
+            return showToast(message, 'error', 5000); // Show errors longer
+        }
+
+        function showInfo(message) {
+            return showToast(message, 'info');
+        }
+
+        // Update only the populateTimezones function
+        function populateTimezones() {
+            const timezoneSelect = document.getElementById('timezone');
+            const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+            
+            // Clear existing options
+            timezoneSelect.innerHTML = '';
+            
+            // Get all timezone names
+            const timeZones = Intl.supportedValuesOf('timeZone');
+            
+            // Sort timezones by offset and name
+            timeZones.sort((a, b) => {
+                try {
+                    // Get current offset for comparison
+                    const offsetA = luxon.DateTime.now().setZone(a).offset;
+                    const offsetB = luxon.DateTime.now().setZone(b).offset;
+                    
+                    // Sort by offset first, then alphabetically
+                    return offsetA !== offsetB ? offsetA - offsetB : a.localeCompare(b);
+                } catch {
+                    return a.localeCompare(b); // Fallback to alphabetical sort
+                }
+            });
+            
+            // Create option elements
+            timeZones.forEach(zone => {
+                try {
+                    const option = document.createElement('option');
+                    const dt = luxon.DateTime.now().setZone(zone);
+                    const offset = dt.toFormat('ZZ');
+                    option.value = zone;
+                    option.text = `${zone} (UTC${offset})`;
+                    option.selected = zone === userTimezone;
+                    timezoneSelect.appendChild(option);
+                } catch (error) {
+                    console.warn(`Skipping timezone ${zone}:`, error);
+                }
+            });
+
+            // Ensure a timezone is selected
+            if (!timezoneSelect.value) {
+                const defaultOption = Array.from(timezoneSelect.options).find(opt => opt.value === 'UTC');
+                if (defaultOption) {
+                    defaultOption.selected = true;
+                }
+            }
+        }
+
+        // Call this when page loads
+        window.addEventListener('DOMContentLoaded', () => {
+            populateTimezones();
+            // ... your existing DOMContentLoaded code ...
+        });
+    </script>
+</body>
+</html>
